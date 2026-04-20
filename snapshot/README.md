@@ -2,70 +2,62 @@
 
 How to bake the Vercel Sandbox snapshot that every daily run boots from.
 
-The snapshot contains:
+## What's in the snapshot (Option F architecture)
+
+The snapshot is intentionally minimal:
 - Node.js 24 (LTS)
 - Claude Code CLI (pre-installed, globally)
-- MCP server binaries (Notion, Slack, GitHub)
-- Claude managed-connector authentication for Gmail + Google Calendar (baked in interactively — the auth state persists in `~/.claude/`)
-- The tone-of-voice skill (and any other custom skills)
+- Empty `/root/.claude/` directory
 
-What the snapshot **does not** contain:
-- Per-service API tokens (Notion / Slack / GitHub) — injected at runtime via env vars
-- Today's prompt or schema — written to `/tmp/` at runtime
+**What the snapshot does NOT contain:**
+- MCP server binaries (not needed — data is prefetched in Vercel Functions)
+- Google OAuth state (not needed — Google data comes pre-fetched)
+- Per-service API tokens (Notion, Slack, GitHub) — these are also used in Vercel Functions, not inside the sandbox
+- The Anthropic API key — injected at runtime via env var
+
+Design note: Option F moved all data gathering into Vercel Functions using
+official SDKs (`googleapis`, `@slack/web-api`, `@notionhq/client`, `@octokit/rest`).
+The sandbox's only job is to run Claude against a prompt that already contains
+all source data. This makes the snapshot trivial to bake and rebake.
 
 ## Prerequisites before baking
 
-You must have completed the admin-setup checklist first (see `ADMIN_SETUP.md` at repo root). In particular:
-- Anthropic API key for Claude Code
-- Vercel team/project linked, `@vercel/sandbox` working locally
+- Anthropic API key available in your shell as `ANTHROPIC_API_KEY`
+- Vercel project linked (`.vercel/project.json` present)
+- `@vercel/sandbox` accessible from your Vercel plan
 
-## Bake flow (one time, plus re-bake on software updates)
-
-The bake script is interactive — you need to approve the Google managed-connector OAuth in a browser once.
+## Bake flow
 
 ```bash
 pnpm run bake-snapshot
 ```
 
-Under the hood, this script:
+The script:
+1. Creates a fresh sandbox with `runtime: "node24"` (no snapshot source)
+2. Runs `snapshot/setup.sh` inside — installs system deps + Claude CLI
+3. Verifies `claude --version` prints successfully
+4. Calls `sandbox.snapshot()` → returns `snap_XXXX...`
+5. Prints the snapshot ID to paste into Vercel env as `VERCEL_SANDBOX_SNAPSHOT_ID`
 
-1. Creates a fresh Vercel Sandbox with `runtime: "node24"` (no snapshot source)
-2. Installs OS deps (`dnf install ...`) and Claude Code CLI globally
-3. Installs the MCP server npm packages (`@notionhq/notion-mcp-server`, `@modelcontextprotocol/server-slack`, `@modelcontextprotocol/server-github`)
-4. Copies the tone-of-voice skill into `~/.claude/skills/`
-5. Runs `claude` once interactively so you can authenticate the Gmail + Google Calendar managed connectors in your browser
-6. Calls `sandbox.snapshot()` → returns `snap_XXXXXXXXXXXX`
-7. Prints the snapshot ID to paste into Vercel env as `VERCEL_SANDBOX_SNAPSHOT_ID`
+Expected bake time: ~3-5 minutes.
 
 ## When to re-bake
 
-Re-bake when:
-- Claude Code CLI releases a major version you want to pick up
-- An MCP server version pin changes
-- You want to add or modify a baked-in skill
-- A managed-connector session has expired and you need to re-authenticate
+- New Claude Code CLI major version you want to pick up
+- Claude Code CLI argument changes that affect the sandbox invocation
+- Infrequent — probably once a quarter at most
 
-Rebaking is slow-ish (5–10 min). Doing it during a known-good development pause is fine.
-
-## Verifying the snapshot works
-
-After baking, the simplest smoke test: manually trigger the cron route.
+## Verifying the snapshot
 
 ```bash
 curl -H "Authorization: Bearer $CRON_SECRET" \
-  https://<your-deployment>.vercel.app/api/cron/recap
+  https://<deployment>.vercel.app/api/cron/recap
 ```
 
-Then inspect the run:
+Then inspect:
 
 ```bash
-npx workflow inspect run <runId> --backend vercel --project daily-recap
+npx workflow inspect runs --backend vercel --project daily-recap
 ```
 
-Successful run = Slack DM arrives in under 8 minutes.
-
-## Troubleshooting the bake
-
-- **Claude auth flow never opens** — interactive sandbox commands require a TTY; ensure the bake script uses `{ stdio: "inherit" }` when calling `runCommand`.
-- **MCP install fails** — some MCP server packages have peer deps that need extra OS libraries. Adjust `snapshot/setup.sh` accordingly.
-- **Managed connector auth doesn't persist** — means the auth state lives outside `~/.claude/` (e.g. in an OS keychain). Fall back to custom OAuth for Google.
+Success = Slack DM arrives in under 8 minutes.

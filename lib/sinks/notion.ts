@@ -72,7 +72,10 @@ export async function writeNotionPage(
           }
         : {}),
     },
-    children: buildBlocks(recap),
+    // Block shapes are validated at runtime by the Notion SDK; the static
+    // union type is too strict to be worth matching in helpers.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    children: buildBlocks(recap) as any,
   });
 
   const url = "url" in page ? (page.url as string) : "";

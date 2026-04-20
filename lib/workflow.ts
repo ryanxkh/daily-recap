@@ -1,48 +1,83 @@
 "use workflow";
 
 /**
- * Daily recap workflow — the WDK orchestrator.
+ * Daily recap workflow — WDK orchestrator for Option F.
  *
- * Runs five steps:
- *   1. runClaudeInSandbox     — boot sandbox, run Claude, return parsed Recap
- *   2+3. Parallel fan-out:
- *        writeNotionPage      — create page in Daily Briefs database
- *        writeArchiveMarkdown — commit .md file to private archive repo
- *   4. sendSlackDM            — post TL;DR + link to Notion page
- *   5. logRunMetadata         — light touch; WDK already captures most run data
+ * Flow:
+ *   1. Parallel prefetch (5 steps): calendar, gmail, slack, notion, github
+ *   2. Synthesize: boot sandbox, run Claude on the prefetched data, return Recap
+ *   3. Parallel fan-out: write Notion page + archive markdown
+ *   4. Slack DM with TL;DR + link to Notion page
+ *   5. Log run metadata
  *
- * The "use workflow" directive makes this function durable and replay-safe.
- * It runs in a sandboxed VM with no fetch / no Node modules — all I/O must
- * happen inside "use step" functions.
+ * Each step has entry/exit logs and uses FatalError vs RetryableError per
+ * failure mode. The workflow function itself orchestrates only — no I/O.
  */
 
 import { FatalError, RetryableError } from "workflow";
+
+import { fetchCalendar } from "./sources/calendar";
+import { fetchGmail } from "./sources/gmail";
+import { fetchSlack } from "./sources/slack";
+import { fetchNotionEdits } from "./sources/notion-reads";
+import { fetchGitHub } from "./sources/github-reads";
+import type { DateWindow } from "./sources/types";
+
 import { runClaudeInSandbox } from "./sandbox";
 import { writeNotionPage } from "./sinks/notion";
 import { writeArchiveMarkdown } from "./sinks/github";
 import { sendSlackDM, sendSlackErrorAlert } from "./sinks/slack";
+
+import type { PromptContext } from "./prompt";
 import type { Recap } from "./schema";
 
 export async function dailyRecapWorkflow(params: {
-  date: string;         // "2026-04-20"
-  dayOfWeek: string;    // "Monday"
-  timezone: string;     // "America/Chicago"
+  date: string;
+  dayOfWeek: string;
+  timezone: string;
 }) {
   console.log(
     JSON.stringify({ event: "workflow.start", date: params.date, dow: params.dayOfWeek }),
   );
 
-  let recap: Recap;
+  // ---------- Step 1: parallel prefetch ----------
+  console.log(JSON.stringify({ event: "workflow.prefetch.start", date: params.date }));
+  const window = { date: params.date, timezone: params.timezone };
+  const [calendar, gmail, slack, notion, github] = await Promise.all([
+    prefetchCalendar(window),
+    prefetchGmail(window),
+    prefetchSlack(window),
+    prefetchNotion(window),
+    prefetchGitHub(window),
+  ]);
+  console.log(
+    JSON.stringify({
+      event: "workflow.prefetch.end",
+      date: params.date,
+      calendar: calendar.ok,
+      gmail: gmail.ok,
+      slack: slack.ok,
+      notion: notion.ok,
+      github: github.ok,
+    }),
+  );
 
-  // Step 1 — the expensive one. Caches on success so downstream retries
-  // don't re-invoke Claude.
+  const ctx: PromptContext = {
+    date: params.date,
+    dayOfWeek: params.dayOfWeek,
+    timezone: params.timezone,
+    sources: { calendar, gmail, slack, notion, github },
+  };
+
+  // ---------- Step 2: synthesize in sandbox ----------
+  let recap: Recap;
   try {
-    recap = await runClaudeStep(params);
+    recap = await synthesizeStep(ctx);
   } catch (err) {
     console.error(
       JSON.stringify({
         event: "workflow.abort",
-        phase: "claude",
+        phase: "synthesize",
         msg: err instanceof Error ? err.message : String(err),
       }),
     );
@@ -53,8 +88,7 @@ export async function dailyRecapWorkflow(params: {
     throw err;
   }
 
-  // Steps 2 & 3 — parallel fan-out. Independent failures; each is retriable
-  // on its own without re-running step 1.
+  // ---------- Step 3: parallel fan-out ----------
   console.log(JSON.stringify({ event: "workflow.fanout.start", date: params.date }));
   const [notionResult, archiveResult] = await Promise.allSettled([
     notionStep(recap),
@@ -72,8 +106,7 @@ export async function dailyRecapWorkflow(params: {
   const notionUrl =
     notionResult.status === "fulfilled" ? notionResult.value.url : undefined;
 
-  // Step 4 — Slack DM with TL;DR + link. Depends on Notion URL when available;
-  // falls back to "Notion write failed" note if it didn't work.
+  // ---------- Step 4: Slack DM ----------
   try {
     await slackStep({
       recap,
@@ -86,31 +119,104 @@ export async function dailyRecapWorkflow(params: {
       phase: "slack",
       message: err instanceof Error ? err.message : String(err),
     });
-    // Non-fatal — we still have the Notion page + archive
   }
 
-  // Step 5 — log run metadata. WDK already captures step timings and retries
-  // via `npx workflow inspect runs`; this is just a breadcrumb.
+  // ---------- Step 5: log ----------
   await logStep(recap);
 
   console.log(JSON.stringify({ event: "workflow.end", date: params.date }));
 }
 
-// ------------------------ Step wrappers ------------------------
+// ------------------------ Prefetch steps ------------------------
+// Each is its own retriable step so one flaky API doesn't require
+// re-running the others.
 
-async function runClaudeStep(params: {
-  date: string;
-  dayOfWeek: string;
-  timezone: string;
-}): Promise<Recap> {
+async function prefetchCalendar(p: DateWindow) {
   "use step";
-  console.log(JSON.stringify({ event: "step.claude.start", date: params.date }));
+  console.log(JSON.stringify({ event: "step.prefetch.calendar.start", date: p.date }));
+  const r = await fetchCalendar(p);
+  console.log(
+    JSON.stringify({
+      event: "step.prefetch.calendar.end",
+      date: p.date,
+      ok: r.ok,
+      count: r.ok ? r.data.length : 0,
+    }),
+  );
+  return r;
+}
+
+async function prefetchGmail(p: DateWindow) {
+  "use step";
+  console.log(JSON.stringify({ event: "step.prefetch.gmail.start", date: p.date }));
+  const r = await fetchGmail(p);
+  console.log(
+    JSON.stringify({
+      event: "step.prefetch.gmail.end",
+      date: p.date,
+      ok: r.ok,
+      count: r.ok ? r.data.length : 0,
+    }),
+  );
+  return r;
+}
+
+async function prefetchSlack(p: DateWindow) {
+  "use step";
+  console.log(JSON.stringify({ event: "step.prefetch.slack.start", date: p.date }));
+  const r = await fetchSlack(p);
+  console.log(
+    JSON.stringify({
+      event: "step.prefetch.slack.end",
+      date: p.date,
+      ok: r.ok,
+      count: r.ok ? r.data.length : 0,
+    }),
+  );
+  return r;
+}
+
+async function prefetchNotion(p: DateWindow) {
+  "use step";
+  console.log(JSON.stringify({ event: "step.prefetch.notion.start", date: p.date }));
+  const r = await fetchNotionEdits(p);
+  console.log(
+    JSON.stringify({
+      event: "step.prefetch.notion.end",
+      date: p.date,
+      ok: r.ok,
+      count: r.ok ? r.data.length : 0,
+    }),
+  );
+  return r;
+}
+
+async function prefetchGitHub(p: DateWindow) {
+  "use step";
+  console.log(JSON.stringify({ event: "step.prefetch.github.start", date: p.date }));
+  const r = await fetchGitHub(p);
+  console.log(
+    JSON.stringify({
+      event: "step.prefetch.github.end",
+      date: p.date,
+      ok: r.ok,
+      count: r.ok ? r.data.length : 0,
+    }),
+  );
+  return r;
+}
+
+// ------------------------ Synthesis + sinks ------------------------
+
+async function synthesizeStep(ctx: PromptContext): Promise<Recap> {
+  "use step";
+  console.log(JSON.stringify({ event: "step.synthesize.start", date: ctx.date }));
   try {
-    const recap = await runClaudeInSandbox(params);
+    const recap = await runClaudeInSandbox(ctx);
     console.log(
       JSON.stringify({
-        event: "step.claude.end",
-        date: params.date,
+        event: "step.synthesize.end",
+        date: ctx.date,
         sources_available: recap.sources_available,
         sources_degraded: recap.sources_degraded,
       }),
@@ -118,10 +224,9 @@ async function runClaudeStep(params: {
     return recap;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(JSON.stringify({ event: "step.claude.error", msg }));
-    // MCP auth failures should NOT retry — a bad token is a bad token.
+    console.error(JSON.stringify({ event: "step.synthesize.error", msg }));
     if (/auth|unauthorized|401|403|invalid.*token/i.test(msg)) {
-      throw new FatalError(`Auth failure in Claude run: ${msg}`);
+      throw new FatalError(`Auth failure in synthesis: ${msg}`);
     }
     throw new RetryableError(msg, { retryAfter: "2m" });
   }

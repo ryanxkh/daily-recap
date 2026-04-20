@@ -179,8 +179,52 @@ Voice: 1st person ("I committed..."). Empty sections keep header with `"nothing 
 
 ---
 
+---
+
+## 2026-04-20 — D15: Pivot to "Option F" — prefetch in Vercel, synthesize in Sandbox
+
+**Decision:** All source data (Calendar, Gmail, Slack, Notion, GitHub) is fetched by Vercel Workflow steps using official SDKs BEFORE the sandbox boots. Claude Code inside the sandbox only synthesizes — it never calls any external API. The MCPs are removed from the sandbox entirely.
+
+**Alternatives considered:**
+- **Original plan (MCPs inside sandbox)** — blocked because Claude Code CLI v2.1.114 has no managed-connector surface. Google OAuth would require community MCPs with their own auth dance each, which defeated the original "managed-connector" simplification that justified the MCP-heavy design.
+- **Anthropic Routines (Sam Shapiro's article pattern)** — would solve Google auth but pulls architecture off Vercel entirely.
+- **Hybrid Routines + Vercel** — cleanest Google story but two systems to debug.
+- **Community Google MCPs in sandbox** — still needs custom OAuth, adds fragility.
+
+**Why:** This architecture is cleaner, more debuggable (curl the source endpoints directly), showcases every Vercel primitive we want to learn (Functions, Workflow, Sandbox, Cron, env, OIDC), and sidesteps the Claude Code managed-connector dead-end entirely. Sinks already used SDKs directly (D14); this extends the same pattern to sources.
+
+**Concrete changes:**
+- `lib/sources/{calendar,gmail,slack,notion-reads,github-reads}.ts` — 5 new modules, one per source
+- `scripts/auth-google.ts` — one-time local OAuth helper that prints a refresh token
+- `lib/prompt.ts` — now accepts prefetched data as a `PromptContext`, embeds it in the prompt
+- `lib/sandbox.ts` — no more MCP config rendering, no token injection into sandbox (except ANTHROPIC_API_KEY)
+- `snapshot/setup.sh` + `scripts/bake-snapshot.ts` — minimal bake (Node + Claude CLI, nothing else)
+- Env vars added: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_USER_EMAIL`
+
+**Trade-off accepted:** Claude can't dynamically drill down into sources during synthesis. For a daily recap with known data needs, this is the right trade.
+
+---
+
+## 2026-04-20 — D16: Prompt-tuning lessons from Sam & Michael
+
+**Decision:** Port three filter patterns from the two "AI Chief of Staff" articles into our prompt:
+
+1. **Explicit SKIP list.** Sam's enumeration: "login/security notifications, marketing, newsletters, automated alerts, subscription confirmations, promotional offers, social media notifications" — much tighter than our original rules. Added to `lib/prompt.ts` HARD rules.
+2. **No padding on empty sections.** Michael's implicit rule: if nothing qualifies, say so — do not fill space. Already in our architecture via the "nothing surfaced today" placeholder; prompt now reinforces "Do not pad with filler."
+3. **"Priorities.md" pattern — deferred to v1.5.** Sam/Michael both have a living priorities doc the agent reads each run. Worth adding later so the recap can flag aging priorities. Not a v1 blocker.
+
+**Why:** These articles are newer than our initial prompt design, and both authors are clearly iterating on real recaps. Free tuning.
+
+**Not adopting:**
+- Michael's "5 modes" framing — useful for general AI collaboration, overkill for a one-shot recap agent
+- Sam's "monthly review" branch — premature; revisit after 30 days of runs
+- Obsidian as reading UI — Notion database serves the same purpose for us
+
+---
+
 ## Upcoming decisions (not yet made)
 
-- Exact Claude Code CLI flag for JSON schema (`--json-schema` may be renamed; verify day 1)
-- Specific Slack app scopes to request (minimum viable set)
+- Exact Claude Code CLI behavior with `--output-format json --json-schema`: does it wrap in `structured_output`? (verify day 1)
+- Specific Slack app scopes to request (minimum viable set — currently generous)
 - Cost caps / spend alerts setup
+- Whether to add a `priorities.md` input file in v1.5

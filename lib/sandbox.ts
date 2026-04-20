@@ -1,46 +1,34 @@
 /**
- * Vercel Sandbox — boot + run Claude Code headless.
+ * Vercel Sandbox — boot + run Claude Code headless to SYNTHESIZE a recap.
  *
- * This file exports ONE function: `runClaudeInSandbox`. The whole sandbox
- * lifecycle (boot → write files → run claude → read output → done) happens
- * inside it, because a Sandbox instance is not serializable and cannot be
- * passed between WDK step functions.
+ * Option F architecture: all data has been pre-fetched by the workflow's
+ * earlier steps and is embedded in the prompt. Claude does not query any
+ * external systems from inside the sandbox. No MCPs needed.
+ *
+ * The sandbox still earns its place here for three reasons:
+ *   1. Isolation — ephemeral microVM is a clean trust boundary
+ *   2. Reproducibility — same image, same Node, same CLI every run
+ *   3. Vercel-platform showcase — part of the build-post narrative
  *
  * Auth: on Vercel deployments, @vercel/sandbox auto-authenticates via
- * VERCEL_OIDC_TOKEN (injected by the platform). For local dev we spread
- * VERCEL_TOKEN / VERCEL_TEAM_ID / VERCEL_PROJECT_ID into Sandbox.create().
- *
- * TODO day 1:
- *   - Verify `claude --json-schema` flag exists in current CLI; if not,
- *     embed schema in prompt and skip the flag.
- *   - Verify `sandbox.writeFiles(...)` method (docs I have show runCommand
- *     patterns; writeFiles is used in Drew's reference code but may have
- *     moved). If missing, fall back to `runCommand("sh", ["-c", heredoc])`.
- *   - Verify sandbox timeout can be bumped to 15m if needed.
+ * VERCEL_OIDC_TOKEN. Locally we pass VERCEL_TOKEN/TEAM_ID/PROJECT_ID.
  */
 
 import { Sandbox } from "@vercel/sandbox";
 import { RecapSchema, type Recap, RECAP_JSON_SCHEMA } from "./schema";
-import { buildDailyRecapPrompt } from "./prompt";
+import { buildDailyRecapPrompt, type PromptContext } from "./prompt";
 
-const SANDBOX_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
+const SANDBOX_TIMEOUT_MS = 10 * 60 * 1000;
 
-export async function runClaudeInSandbox(params: {
-  date: string;
-  dayOfWeek: string;
-  timezone: string;
-}): Promise<Recap> {
+export async function runClaudeInSandbox(ctx: PromptContext): Promise<Recap> {
   const snapshotId = process.env.VERCEL_SANDBOX_SNAPSHOT_ID;
-  if (!snapshotId) {
-    throw new Error("VERCEL_SANDBOX_SNAPSHOT_ID is not set");
-  }
+  if (!snapshotId) throw new Error("VERCEL_SANDBOX_SNAPSHOT_ID is not set");
+
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY is not set");
 
   console.log(
-    JSON.stringify({
-      event: "sandbox.boot.start",
-      date: params.date,
-      snapshotId,
-    }),
+    JSON.stringify({ event: "sandbox.boot.start", date: ctx.date, snapshotId }),
   );
 
   const sandbox = await Sandbox.create({
@@ -49,44 +37,36 @@ export async function runClaudeInSandbox(params: {
     timeout: SANDBOX_TIMEOUT_MS,
   });
 
-  console.log(JSON.stringify({ event: "sandbox.boot.complete", date: params.date }));
+  console.log(JSON.stringify({ event: "sandbox.boot.complete", date: ctx.date }));
 
   try {
-    const prompt = buildDailyRecapPrompt(params);
+    const prompt = buildDailyRecapPrompt(ctx);
 
-    const mcpConfig = renderMCPConfig({
-      notionToken: requireEnv("NOTION_TOKEN"),
-      slackBotToken: requireEnv("SLACK_BOT_TOKEN"),
-      githubToken: requireEnv("GITHUB_TOKEN"),
-    });
-
-    // Write the three input files via a single shell heredoc — more portable
-    // than relying on a writeFiles method we haven't yet verified in the
-    // current SDK. If writeFiles is available, we'll swap to it.
+    // Write inputs via shell heredoc — simpler than relying on an SDK
+    // writeFiles method we haven't needed to verify. Only two files:
+    // the prompt (possibly large) and the JSON schema for validation.
     await sandbox.runCommand("sh", [
       "-c",
       [
-        `mkdir -p /root/.claude`,
         `cat > /tmp/prompt.txt <<'DAILYRECAPEOF'\n${prompt}\nDAILYRECAPEOF`,
         `cat > /tmp/schema.json <<'DAILYRECAPEOF'\n${RECAP_JSON_SCHEMA}\nDAILYRECAPEOF`,
-        `cat > /root/.claude/mcp_config.json <<'DAILYRECAPEOF'\n${mcpConfig}\nDAILYRECAPEOF`,
       ].join(" && "),
     ]);
 
-    console.log(JSON.stringify({ event: "claude.run.start", date: params.date }));
+    console.log(JSON.stringify({ event: "claude.run.start", date: ctx.date }));
 
-    // TODO verify: `--json-schema` flag in current Claude Code CLI.
-    // If absent, drop the flag — the schema is already embedded in the prompt
-    // and Zod will enforce the shape after parsing.
     const result = await sandbox.runCommand("sh", [
       "-c",
-      [
-        "claude",
-        "--dangerously-skip-permissions",
-        "--output-format json",
-        '--json-schema "$(cat /tmp/schema.json)"',
-        '-p "$(cat /tmp/prompt.txt)"',
-      ].join(" "),
+      // The ANTHROPIC_API_KEY is injected into the sandbox at runtime.
+      // --strict-mcp-config + empty --mcp-config ensures no MCP side-loading.
+      `ANTHROPIC_API_KEY='${anthropicKey.replace(/'/g, "'\\''")}' claude ` +
+        [
+          "--dangerously-skip-permissions",
+          "--print",
+          "--output-format json",
+          '--json-schema "$(cat /tmp/schema.json)"',
+          '"$(cat /tmp/prompt.txt)"',
+        ].join(" "),
     ]);
 
     const stdout = await result.stdout();
@@ -95,7 +75,7 @@ export async function runClaudeInSandbox(params: {
     console.log(
       JSON.stringify({
         event: "claude.run.complete",
-        date: params.date,
+        date: ctx.date,
         stdoutBytes: stdout.length,
         stderrBytes: stderr.length,
       }),
@@ -107,21 +87,17 @@ export async function runClaudeInSandbox(params: {
       );
     }
 
-    // Claude Code wraps structured output in `structured_output` when
-    // `--json-schema` is passed. Adjust if the shape is different.
     const parsed = JSON.parse(stdout);
+    // Claude Code wraps structured output in `structured_output` when
+    // --json-schema is passed. Adjust if the shape differs.
     const recapJson = parsed.structured_output ?? parsed;
     return RecapSchema.parse(recapJson);
   } finally {
-    await sandbox.stop().catch(() => {
-      // best-effort cleanup; sandboxes auto-expire on timeout
-    });
+    await sandbox.stop().catch(() => {});
   }
 }
 
 function getSandboxCredentials() {
-  // On Vercel, OIDC handles this automatically — return empty object.
-  // For local dev, populate via `vercel env pull .env.local`.
   if (
     process.env.VERCEL_TOKEN &&
     process.env.VERCEL_TEAM_ID &&
@@ -134,44 +110,4 @@ function getSandboxCredentials() {
     };
   }
   return {};
-}
-
-function requireEnv(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`${name} is not set`);
-  return v;
-}
-
-function renderMCPConfig(tokens: {
-  notionToken: string;
-  slackBotToken: string;
-  githubToken: string;
-}): string {
-  // Claude Code MCP config shape. The MCP server npm packages referenced here
-  // must be installed into the snapshot during bake (see snapshot/setup.sh).
-  // Gmail + Google Calendar: Claude-managed connectors, authenticated
-  // interactively during snapshot bake — nothing configured here.
-  return JSON.stringify(
-    {
-      mcpServers: {
-        notion: {
-          command: "npx",
-          args: ["-y", "@notionhq/notion-mcp-server"],
-          env: { NOTION_API_KEY: tokens.notionToken },
-        },
-        slack: {
-          command: "npx",
-          args: ["-y", "@modelcontextprotocol/server-slack"],
-          env: { SLACK_BOT_TOKEN: tokens.slackBotToken },
-        },
-        github: {
-          command: "npx",
-          args: ["-y", "@modelcontextprotocol/server-github"],
-          env: { GITHUB_PERSONAL_ACCESS_TOKEN: tokens.githubToken },
-        },
-      },
-    },
-    null,
-    2,
-  );
 }

@@ -125,6 +125,45 @@ Copy → this is `ANTHROPIC_API_KEY`. This is used by Claude Code CLI running in
 
 ---
 
+## 4.5 Google Cloud OAuth (for Gmail + Calendar)
+
+Since Option F: we read Gmail + Calendar directly from Vercel Functions using `googleapis`, which needs an OAuth 2.0 client.
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) → pick or create a project (name it `daily-recap` or use an existing personal project)
+2. **APIs & Services → Library** → enable:
+   - **Gmail API**
+   - **Google Calendar API**
+3. **APIs & Services → OAuth consent screen**:
+   - User Type: **External** (unless you have a Google Workspace — then Internal is fine)
+   - App name: `Daily Recap Agent`
+   - User support email: your email
+   - Developer contact: your email
+   - Scopes: skip (we'll send scopes at runtime)
+   - Test users: **add your own Gmail address** (required while app is in testing)
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
+   - Application type: **Desktop app**
+   - Name: `daily-recap-cli`
+   - Save → copy the **Client ID** and **Client Secret**
+
+Then locally:
+
+```bash
+export GOOGLE_CLIENT_ID=<paste>
+export GOOGLE_CLIENT_SECRET=<paste>
+pnpm run auth:google
+```
+
+Browser opens → approve both Gmail + Calendar scopes → terminal prints the refresh token. Add all 4 values to Vercel env:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REFRESH_TOKEN`
+- `GOOGLE_USER_EMAIL` — your Gmail address (for filtering sent vs received in the Gmail source)
+
+The refresh token doesn't expire unless revoked or unused for 6 months.
+
+---
+
 ## 5. Vercel project
 
 ### Link the local repo

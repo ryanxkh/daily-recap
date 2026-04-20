@@ -1,90 +1,185 @@
 /**
  * Prompt builder for the daily recap agent.
  *
- * This prompt is the single most important piece of the system — selectivity
- * lives here. Expect to iterate on it over the first 1-2 weeks of real runs.
+ * In Option F (the current architecture), data is prefetched by Vercel
+ * Functions and passed INTO this prompt as structured context. Claude's
+ * job is synthesis + selectivity, not data gathering.
  *
- * Structure:
- *   1. Role + context
- *   2. Sources available + degradation handling
- *   3. Required sections (ordered for the natural arc)
- *   4. Voice + tone guidance
- *   5. Selectivity rules (hard excludes + soft filters)
- *   6. Output contract
+ * This file is the single most important piece of prompt engineering in
+ * the system. Expect to iterate on the filter rules over the first
+ * 1-2 weeks of real runs.
  */
 
-export function buildDailyRecapPrompt(input: {
-  date: string;          // "2026-04-20"
-  dayOfWeek: string;     // "Monday"
-  timezone: string;      // "America/Chicago"
-}): string {
-  const { date, dayOfWeek, timezone } = input;
+import type { CalendarEvent } from "./sources/calendar";
+import type { EmailThreadSummary } from "./sources/gmail";
+import type { SlackMessageSummary } from "./sources/slack";
+import type { NotionPageSummary } from "./sources/notion-reads";
+import type { GitHubActivityItem } from "./sources/github-reads";
+
+export interface PromptContext {
+  date: string;
+  dayOfWeek: string;
+  timezone: string;
+  sources: {
+    calendar: { ok: boolean; data?: CalendarEvent[]; reason?: string };
+    gmail: { ok: boolean; data?: EmailThreadSummary[]; reason?: string };
+    slack: { ok: boolean; data?: SlackMessageSummary[]; reason?: string };
+    notion: { ok: boolean; data?: NotionPageSummary[]; reason?: string };
+    github: { ok: boolean; data?: GitHubActivityItem[]; reason?: string };
+  };
+}
+
+export function buildDailyRecapPrompt(ctx: PromptContext): string {
+  const { date, dayOfWeek, timezone, sources } = ctx;
+
+  const degraded: string[] = [];
+  if (!sources.calendar.ok) degraded.push(`calendar: ${sources.calendar.reason}`);
+  if (!sources.gmail.ok) degraded.push(`gmail: ${sources.gmail.reason}`);
+  if (!sources.slack.ok) degraded.push(`slack: ${sources.slack.reason}`);
+  if (!sources.notion.ok) degraded.push(`notion: ${sources.notion.reason}`);
+  if (!sources.github.ok) degraded.push(`github: ${sources.github.reason}`);
+
+  const available = [
+    sources.calendar.ok && "calendar",
+    sources.gmail.ok && "gmail",
+    sources.slack.ok && "slack",
+    sources.notion.ok && "notion",
+    sources.github.ok && "github",
+  ].filter(Boolean) as string[];
 
   return `You are Ryan's personal assistant. Today is ${dayOfWeek}, ${date} (${timezone}).
 
 Your job is to produce Ryan's end-of-day recap — a first-person journal entry that captures what actually happened today and sets up tomorrow morning. Written at 6pm tonight; re-read at 7am tomorrow.
 
-## Data sources available to you (via MCP)
+## Available sources this run
 
-- **Google Calendar** — today's meetings, attendees, duration
-- **Gmail** — threads sent and received today; focus on commitments made, asks pending, follow-ups owed
-- **Slack** — DMs, threads where Ryan was @-mentioned or replied; active channel participation
-- **Notion** — meeting notes captured, pages edited, docs touched
-- **GitHub** — PRs reviewed, issues commented on, design docs in markdown
+Available: ${available.join(", ") || "(none)"}
+${degraded.length > 0 ? `Degraded: ${degraded.join("; ")}` : "All sources ok."}
 
-Query each source for content dated ${date} in Ryan's timezone (${timezone}).
+## Input data (pre-fetched — do not query external systems)
 
-**If a source fails or returns an error**, continue with remaining sources. Add the failed source to \`sources_degraded\` in your output with a one-line reason. Do not retry failed sources.
+### Calendar (today's events)
+${formatCalendar(sources.calendar)}
 
-## Required output sections (in this order — it mirrors the natural arc of closing today → opening tomorrow)
+### Gmail (threads from the last 24h, de-noised via category filters)
+${formatGmail(sources.gmail)}
+
+### Slack (DMs + mentions + your replies today)
+${formatSlack(sources.slack)}
+
+### Notion (pages edited today in your workspace)
+${formatNotion(sources.notion)}
+
+### GitHub (PRs / issues / reviews you touched today)
+${formatGitHub(sources.github)}
+
+## Required output sections
+
+Output a JSON object matching the provided schema with these sections, in this order (natural arc: close today → open tomorrow):
 
 1. **todays_wins** — things that actually moved: decisions made, work shipped, meetings that unlocked something. Not "attended standup" — that's not a win.
+2. **commitments_made** — explicit or implicit promises Ryan made today. "I'll send the draft Friday." "I'll intro you." Include who it's to. Pulled from Gmail sent, Slack replies, meeting attendance.
+3. **loose_ends** — unanswered emails, DMs without a response, asks Ryan ignored. The guilt pile. Be specific about who's waiting and what they asked.
+4. **tomorrow_on_deck** — NOT today's calendar. You don't have tomorrow's calendar in the data here — leave this as an empty array and note in the daily_learning that tomorrow-preview is a v1.5 addition.
+5. **front_load_candidates** — admin/quick-win tasks for tomorrow AM. Specific actions, not strategic work.
+6. **watch_list** — signals brewing that don't need action today but worth monitoring.
+7. **questions_surfaced** — things Ryan encountered today but didn't resolve.
+8. **daily_learning** — one-line takeaway worth remembering.
 
-2. **commitments_made** — explicit or implicit promises Ryan made to others today. "I'll send the draft Friday." "Let me look into X." "I'll intro you." Pulled from Slack, Gmail, meeting notes. Include who it's to.
-
-3. **loose_ends** — unanswered DMs, unreplied emails, asks Ryan has ignored. The guilt pile. Be specific about who's waiting and what they asked.
-
-4. **tomorrow_on_deck** — tomorrow's calendar meetings with a one-line prep note for each (what it's about, who's attending, what Ryan should think about beforehand).
-
-5. **front_load_candidates** — admin or quick-win tasks Ryan can knock out first thing tomorrow AM so they don't eat his day. Not strategic work — actual "respond to X, forward Y, schedule Z" items.
-
-6. **watch_list** — signals brewing that don't need action today but worth monitoring: deal status changes, team dynamics, blocked projects, recurring themes.
-
-7. **questions_surfaced** — things Ryan encountered today but didn't resolve. Open technical questions, Vercel platform questions, strategic questions.
-
-8. **daily_learning** — one-line takeaway from today that's worth remembering. Compounds into a personal knowledge base. If nothing surfaces, write something true and small rather than profound.
-
-**For any section with nothing worth reporting, return an array containing the single string \`"nothing surfaced today"\`** (or for daily_learning, the same string). Don't drop sections — consistency matters.
+**Empty sections:** return an array containing the single string \`"nothing surfaced today"\` (or for daily_learning, that string directly). Don't drop sections.
 
 ## Voice and tone
 
 - **First person.** "I committed to sending the draft Friday." Never "Ryan committed..." or "You committed..."
-- **Ryan's voice.** Direct, concise, lightly wry, zero corporate jargon. Fragments are fine. No exclamation marks, no emojis, no motivational pap.
-- **Active verbs.** "I shipped X." Not "X was shipped."
-- **Include links.** Slack permalinks, Notion page URLs, GitHub PR URLs, email message IDs. Any time you reference a specific artifact, link it.
+- **Ryan's voice.** Direct, concise, lightly wry, zero corporate jargon. Fragments fine. No exclamation marks, no emojis, no motivational pap.
+- **Active verbs.** "I shipped X" not "X was shipped."
+- **Include links.** Slack permalinks, Gmail thread URLs, Notion page URLs, GitHub PR URLs. Any time you reference a specific artifact, link it.
 
-## Selectivity rules (hard — these always apply)
+## Selectivity rules (HARD — never violate)
 
-- **Exclude** bot/automation noise: CI notifications, marketing emails, newsletters, digest emails, bot-posted Slack messages, "@channel" announcements Ryan didn't engage with.
-- **Exclude** Slack channel chatter Ryan scrolled past — only include messages where Ryan was @-mentioned, DMed, or replied.
-- **Include** real discussion and real commitments. Exclude noise.
+- **SKIP** and do not include: login/security notifications, marketing emails, newsletters, automated alerts, subscription confirmations, promotional offers, social media notifications, CI/CD bot messages, "@channel" announcements Ryan didn't engage with, @-mentions in firehose channels where Ryan didn't reply.
+- **Include only** real discussion and real commitments — anything that requires a human response or reflects a decision.
+- **Slack channel chatter Ryan scrolled past doesn't count.** Only DMs, mentions Ryan engaged with, or replies he sent.
 
-## Selectivity rules (soft — use judgment)
+## Selectivity rules (SOFT — use judgment)
 
-- Recurring holds, focus blocks, or standups with no actual discussion: skip unless something specific happened.
-- "Got it, thanks!" style confirmations: skip.
+- Recurring holds / focus blocks / standups with no specific discussion: skip unless something happened.
+- "Got it, thanks!" confirmations: skip.
 - Personal/non-work content: include only if clearly relevant.
-- Uncertainty: prefer excluding. A shorter, more selective recap is more valuable than a comprehensive one.
+- **When uncertain, exclude.** A shorter, more selective recap is more valuable than a comprehensive one.
+- **If a section has nothing genuinely worth reporting, use the "nothing surfaced today" placeholder. Do not pad with filler.**
 
 ## Length target
 
-~400–600 words total across all sections. The goal is skimmable in 60 seconds.
+~400–600 words total across all sections. Skimmable in 60 seconds.
 
 ## TL;DR bullets
 
-After producing the sections, generate 3–5 short bullets (under 90 chars each) for a Slack DM headline. These should be the most important things from the full recap — not a summary, a filter. The things that would make Ryan sit up if he saw nothing else.
+After the sections, generate 3–5 short bullets (under 90 chars each) for a Slack DM headline. Most important things only — the items that would make Ryan sit up if he saw nothing else.
 
 ## Output format
 
-Return your response as a single JSON object matching the provided schema. No prose before or after — just the JSON object.`;
+Return a single JSON object matching the provided schema. No prose before or after — just the JSON.
+
+## Degradation
+
+If sources_degraded is non-empty above, mirror that in your output's sources_degraded field (copy each "source: reason" string). Produce the best recap you can with the data you do have.`;
+}
+
+// ----------------------------- Formatters -----------------------------
+
+function formatCalendar(src: PromptContext["sources"]["calendar"]): string {
+  if (!src.ok) return `(unavailable: ${src.reason})`;
+  const events = src.data ?? [];
+  if (events.length === 0) return "(no events)";
+  return events
+    .map((e) => {
+      const attendees = e.attendees.length > 0 ? ` [${e.attendees.join(", ")}]` : "";
+      const recurring = e.isRecurring ? " [recurring]" : "";
+      const allDay = e.isAllDay ? " [all-day]" : "";
+      return `- ${e.start} → ${e.end}${allDay}${recurring}: ${e.summary}${attendees}${e.location ? ` @ ${e.location}` : ""} <${e.htmlLink}>`;
+    })
+    .join("\n");
+}
+
+function formatGmail(src: PromptContext["sources"]["gmail"]): string {
+  if (!src.ok) return `(unavailable: ${src.reason})`;
+  const threads = src.data ?? [];
+  if (threads.length === 0) return "(no threads)";
+  return threads
+    .map((t) => {
+      const direction = t.isFromMe ? "SENT" : "RECV";
+      return `- ${direction} | from: ${t.from} | to: ${t.to} | subject: ${t.subject}\n  snippet: ${t.snippet}\n  link: ${t.link}`;
+    })
+    .join("\n");
+}
+
+function formatSlack(src: PromptContext["sources"]["slack"]): string {
+  if (!src.ok) return `(unavailable: ${src.reason})`;
+  const msgs = src.data ?? [];
+  if (msgs.length === 0) return "(no messages)";
+  return msgs
+    .map((m) => {
+      const kind = m.isDM ? "DM" : m.isMention ? "MENTION" : "REPLY";
+      return `- [${kind}] ${m.channelName} | from ${m.fromUserName || m.fromUserId}: ${m.text}\n  link: ${m.permalink}`;
+    })
+    .join("\n");
+}
+
+function formatNotion(src: PromptContext["sources"]["notion"]): string {
+  if (!src.ok) return `(unavailable: ${src.reason})`;
+  const pages = src.data ?? [];
+  if (pages.length === 0) return "(no pages edited)";
+  return pages
+    .map((p) => `- ${p.title} | edited ${p.lastEdited} | ${p.url}`)
+    .join("\n");
+}
+
+function formatGitHub(src: PromptContext["sources"]["github"]): string {
+  if (!src.ok) return `(unavailable: ${src.reason})`;
+  const items = src.data ?? [];
+  if (items.length === 0) return "(no activity)";
+  return items
+    .map((i) => `- [${i.kind}] ${i.repo}: ${i.title} (${i.state}) | ${i.url}`)
+    .join("\n");
 }

@@ -11,6 +11,7 @@
     "workflow:web": "workflow web",
     "workflow:runs": "workflow inspect runs",
     "bake-snapshot": "tsx scripts/bake-snapshot.ts",
+    "auth:google": "tsx scripts/auth-google.ts",
     "trigger:local": "curl -H \"Authorization: Bearer ${CRON_SECRET}\" http://localhost:3000/api/cron/recap"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
     "@octokit/rest": "^21.0.0",
     "@slack/web-api": "^7.0.0",
     "@vercel/sandbox": "latest",
+    "googleapis": "^144.0.0",
     "next": "^16.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

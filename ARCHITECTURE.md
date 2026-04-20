@@ -23,7 +23,7 @@ This project adapts that pattern with three changes:
 2. **Vercel Workflow (WDK)** for durable step-based execution, so an individual sink failure doesn't require re-running Claude
 3. **Claude's managed OAuth connectors** for Gmail + Google Calendar — eliminates writing custom OAuth refresh-token logic
 
-## High-level architecture
+## High-level architecture (Option F, current)
 
 ```
 ┌─────────────────────┐
@@ -38,49 +38,55 @@ This project adapts that pattern with three changes:
 └──────────┬──────────┘
            │
            ▼
-┌────────────────────────────────────────────────────────────┐
-│ Vercel Workflow — dailyRecapWorkflow                        │
-│                                                             │
-│   Step 1: runClaudeInSandbox(date)                          │
-│     - Boots Vercel Sandbox from pre-baked snapshot          │
-│     - Writes prompt + JSON schema to /tmp                   │
-│     - Runs: claude --output-format json -p ...              │
-│     - Claude autonomously uses MCPs to gather data:         │
-│         • Google Calendar (managed connector)               │
-│         • Gmail (managed connector)                         │
-│         • Slack                                             │
-│         • Notion (read side — meeting notes, docs)          │
-│         • GitHub                                            │
-│     - Returns parsed Zod-validated Recap object             │
-│                                                             │
-│   Step 2-3 (parallel): Promise.all([                        │
-│     writeNotionPage(recap)      → Daily Briefs DB           │
-│     writeArchiveMarkdown(recap) → private recap archive     │
-│   ])                                                         │
-│                                                             │
-│   Step 4: sendSlackDM(recap, notionUrl)                     │
-│     - TL;DR bullets + link to Notion page                   │
-│                                                             │
-│   Step 5: logRunMetadata(recap)                             │
-│     - WDK run metadata (built-in via `npx workflow web`)    │
-└────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│ Vercel Workflow — dailyRecapWorkflow                                 │
+│                                                                      │
+│   Step 1: parallel prefetch (5 "use step" functions in Promise.all)  │
+│     • fetchCalendar()       ← googleapis SDK + refresh token         │
+│     • fetchGmail()          ← googleapis SDK + refresh token         │
+│     • fetchSlack()          ← @slack/web-api + bot token             │
+│     • fetchNotionEdits()    ← @notionhq/client + integration secret  │
+│     • fetchGitHub()         ← @octokit/rest + PAT                    │
+│     Each returns Result<T> = {ok: true, data} or {ok: false, reason} │
+│                                                                      │
+│   Step 2: synthesizeStep(ctx)                                        │
+│     - Boots Vercel Sandbox from minimal snapshot (just Claude CLI)   │
+│     - Writes prompt (with prefetched data embedded) + JSON schema    │
+│     - Runs: claude --print --output-format json --json-schema ...    │
+│     - NO MCP calls from inside the sandbox — pure synthesis          │
+│     - Returns Zod-validated Recap object                             │
+│                                                                      │
+│   Steps 3-4 (parallel): Promise.allSettled([                         │
+│     writeNotionPage(recap)      → Daily Briefs DB                    │
+│     writeArchiveMarkdown(recap) → private recap archive              │
+│   ])                                                                  │
+│                                                                      │
+│   Step 5: sendSlackDM(recap, notionUrl)                              │
+│     - TL;DR bullets + link to Notion page                            │
+│                                                                      │
+│   Step 6: logRunMetadata(recap)                                      │
+│     - WDK run metadata (built-in via `npx workflow web`)             │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-## The three seams
+### The Option F pivot
 
-Understanding the build requires seeing three distinct execution contexts:
+The original architecture had Claude Code inside the sandbox calling MCP servers to gather data. That broke when we discovered Claude Code CLI v2.1.114 has no managed-connector surface for Google services — the managed connectors we saw in the session at boot (`mcp__claude_ai_Gmail__*`) belong to Claude.ai / Claude API, not the CLI.
 
-1. **Vercel serverless (workflow host)** — the Next.js app itself. Runs the cron route, hosts the WDK workflow definitions, runs step functions with full Node.js access. This is where the Notion/GitHub/Slack **sink writes** happen using official SDKs.
-2. **Vercel Sandbox (Claude host)** — a Firecracker microVM booted per run from a pre-baked snapshot. Claude Code runs here with MCP servers configured. This is where the **data gathering** happens.
-3. **External services** — Google, Slack, Notion, GitHub. Two reach paths:
-   - **Read via MCP** (inside sandbox): Claude pulls data using MCP servers
-   - **Write via SDK** (inside workflow step): Our code writes sinks using official SDKs
+Rather than wire up community Google MCPs with custom OAuth *inside* the sandbox, we pushed all data gathering OUT of the sandbox and into Vercel Functions using official SDKs. The sandbox now only does synthesis. See `decisions.md` D15 for the full reasoning.
 
-**Key design decision:** sinks are written by our code, not by Claude through an MCP. Rationale:
-- More reliable (Claude sometimes misformats structured writes)
-- Faster (no extra round-trip through Claude)
-- Cleaner error handling (we know exactly which sink failed)
-- Separation of concerns (Claude reads; we write)
+**Why this is architecturally better anyway:**
+- Debuggable: `curl /api/sources/calendar/today` returns raw data directly
+- Deterministic: no agentic exploration chaos
+- Showcases Vercel: every Vercel primitive is in scope (Functions, Workflow, Sandbox, Cron, env, OIDC, Git-deploy)
+- Simpler snapshot: nothing to bake except Claude CLI itself
+
+## The two execution seams (updated for Option F)
+
+1. **Vercel serverless (workflow host)** — the Next.js app. Runs the cron route, hosts the WDK workflow definitions, runs all step functions with full Node.js access. **Every external API call happens here** — both source reads (Gmail, Calendar, Slack, Notion, GitHub) and sink writes (Notion page, archive repo, Slack DM).
+2. **Vercel Sandbox (Claude host)** — a Firecracker microVM booted per run from a minimal pre-baked snapshot. Runs Claude Code headless with the prompt. **Does not call any external API.** Pure synthesis of the data embedded in its prompt.
+
+**Key design principle:** **Claude synthesizes; Vercel integrates.** All API complexity (OAuth refresh, retries, rate limits, auth rotation) stays in our code where we control it. Claude only does what it's genuinely good at — turning structured data into structured prose.
 
 ## Why Vercel Workflow (WDK)
 
