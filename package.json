@@ -1,0 +1,37 @@
+{
+  "name": "daily-recap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal daily recap agent — Vercel Cron triggers Claude Code in a Vercel Sandbox to synthesize a daily brief from Google/Slack/Notion/GitHub activity",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "workflow:web": "workflow web",
+    "workflow:runs": "workflow inspect runs",
+    "bake-snapshot": "tsx scripts/bake-snapshot.ts",
+    "trigger:local": "curl -H \"Authorization: Bearer ${CRON_SECRET}\" http://localhost:3000/api/cron/recap"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.3.0",
+    "@octokit/rest": "^21.0.0",
+    "@slack/web-api": "^7.0.0",
+    "@vercel/sandbox": "latest",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "workflow": "latest",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+
+# Environment — never commit real tokens
+.env
+.env.local
+.env.development.local
+.env.production.local
+.env*.local
+
+# Vercel
+.vercel
+
+# Local test outputs
+/tmp-recaps/
+*.log
+
+# Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Snapshot artifacts
+snapshot/.local-state/
+snapshot/tokens/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
