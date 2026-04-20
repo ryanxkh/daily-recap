@@ -1,9 +1,6 @@
 import type { NextConfig } from "next";
+import { withWorkflow } from "workflow/next";
 
-const nextConfig: NextConfig = {
-  experimental: {
-    // WDK integration — see node_modules/@workflow/next docs after install
-  },
-};
+const nextConfig: NextConfig = {};
 
-export default nextConfig;
+export default withWorkflow(nextConfig);
