@@ -10,11 +10,9 @@ dist/
 build/
 
 # Environment — never commit real tokens
-.env
-.env.local
-.env.development.local
-.env.production.local
-.env*.local
+# Broad ignore pattern with explicit allowlist for the template
+.env*
+!.env.example
 
 # Vercel
 .vercel
