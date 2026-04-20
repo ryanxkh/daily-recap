@@ -96,6 +96,45 @@ export async function runClaudeInSandbox(ctx: PromptContext): Promise<Recap> {
 }
 
 /**
+ * Claude Code `--print` JSON sometimes nests the recap in `result` as a string
+ * wrapped in ```json ... ``` fences. `JSON.parse` on the raw string fails;
+ * strip optional fences first, then parse.
+ */
+function stripMarkdownJsonFence(s: string): string {
+  let t = s.trim();
+  if (!t.startsWith("```")) return t;
+  t = t.slice(3);
+  if (t.toLowerCase().startsWith("json")) {
+    t = t.slice(4);
+  }
+  t = t.trimStart();
+  if (t.startsWith("\n")) t = t.slice(1);
+  t = t.trimEnd();
+  if (t.endsWith("```")) {
+    t = t.slice(0, -3).trimEnd();
+  }
+  return t.trim();
+}
+
+function tryParseJsonRecapString(raw: string): unknown | null {
+  const stripped = stripMarkdownJsonFence(raw);
+  const trimmed = raw.trim();
+  const payloads = stripped === trimmed ? [stripped] : [stripped, trimmed];
+  for (const payload of payloads) {
+    try {
+      return JSON.parse(payload);
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+function isRecapEnvelope(c: unknown): boolean {
+  return c !== null && typeof c === "object" && "sections" in (c as object);
+}
+
+/**
  * Claude Code CLI wraps the --json-schema output in varying shapes depending
  * on version. Try a few known paths and log a shape diagnostic if none match.
  */
@@ -108,7 +147,7 @@ function extractRecapJson(parsed: unknown): unknown {
     () => {
       const r = root.result;
       if (typeof r === "string") {
-        try { return JSON.parse(r); } catch { return null; }
+        return tryParseJsonRecapString(r);
       }
       return null;
     },
@@ -119,13 +158,14 @@ function extractRecapJson(parsed: unknown): unknown {
       const msgs = root.messages as Array<{ content?: unknown }> | undefined;
       const first = msgs?.[0]?.content;
       if (typeof first === "string") {
-        try { return JSON.parse(first); } catch { return null; }
+        return tryParseJsonRecapString(first);
       }
       if (Array.isArray(first)) {
         for (const c of first) {
           const text = (c as { text?: unknown })?.text;
           if (typeof text === "string") {
-            try { return JSON.parse(text); } catch { /* keep looking */ }
+            const parsedText = tryParseJsonRecapString(text);
+            if (parsedText !== null) return parsedText;
           }
         }
       }
@@ -137,7 +177,7 @@ function extractRecapJson(parsed: unknown): unknown {
   for (const get of candidates) {
     try {
       const c = get();
-      if (c && typeof c === "object" && "sections" in (c as object)) {
+      if (isRecapEnvelope(c)) {
         return c;
       }
     } catch { /* try next */ }
