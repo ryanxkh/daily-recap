@@ -88,13 +88,70 @@ export async function runClaudeInSandbox(ctx: PromptContext): Promise<Recap> {
     }
 
     const parsed = JSON.parse(stdout);
-    // Claude Code wraps structured output in `structured_output` when
-    // --json-schema is passed. Adjust if the shape differs.
-    const recapJson = parsed.structured_output ?? parsed;
+    const recapJson = extractRecapJson(parsed);
     return RecapSchema.parse(recapJson);
   } finally {
     await sandbox.stop().catch(() => {});
   }
+}
+
+/**
+ * Claude Code CLI wraps the --json-schema output in varying shapes depending
+ * on version. Try a few known paths and log a shape diagnostic if none match.
+ */
+function extractRecapJson(parsed: unknown): unknown {
+  const root = parsed as Record<string, unknown>;
+
+  const candidates: Array<() => unknown> = [
+    () => root.structured_output,
+    () => (root.result as Record<string, unknown>)?.structured_output,
+    () => {
+      const r = root.result;
+      if (typeof r === "string") {
+        try { return JSON.parse(r); } catch { return null; }
+      }
+      return null;
+    },
+    () => root.result,
+    () => root.content,
+    () => {
+      // Some versions return messages: [{ content: [{ text: "<json>" }] }]
+      const msgs = root.messages as Array<{ content?: unknown }> | undefined;
+      const first = msgs?.[0]?.content;
+      if (typeof first === "string") {
+        try { return JSON.parse(first); } catch { return null; }
+      }
+      if (Array.isArray(first)) {
+        for (const c of first) {
+          const text = (c as { text?: unknown })?.text;
+          if (typeof text === "string") {
+            try { return JSON.parse(text); } catch { /* keep looking */ }
+          }
+        }
+      }
+      return null;
+    },
+    () => parsed,
+  ];
+
+  for (const get of candidates) {
+    try {
+      const c = get();
+      if (c && typeof c === "object" && "sections" in (c as object)) {
+        return c;
+      }
+    } catch { /* try next */ }
+  }
+
+  // Nothing matched — log shape for diagnosis
+  console.error(
+    JSON.stringify({
+      event: "claude.extract.failed",
+      topLevelKeys: Object.keys(root),
+      sample: JSON.stringify(parsed).slice(0, 800),
+    }),
+  );
+  return parsed;
 }
 
 function getSandboxCredentials() {
