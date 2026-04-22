@@ -108,46 +108,39 @@ Observability comes free: `npx workflow web <run_id>` gives a visual dashboard o
 
 Claude Code in a sandbox gives us:
 - **Isolation** — `--dangerously-skip-permissions` is safe because the VM is ephemeral and has no standing access to anything
-- **Predictable environment** — same Node version, same MCP binaries, same shell every run
+- **Predictable environment** — same Node version, same Claude CLI version, same shell every run
 - **Fast cold starts** — snapshots boot in seconds, not minutes
 
-The snapshot holds:
-- OS + Node + Claude Code CLI
-- MCP server binaries (installed via `npm install -g ...`)
-- Authenticated Claude session (for Google managed connectors)
-- Custom skills (e.g., tone-of-voice skill)
+The snapshot holds (Option F — minimal by design):
+- OS (Amazon Linux 2023) + Node.js 24
+- Claude Code CLI, installed via `npm install -g @anthropic-ai/claude-code`
+- An empty `/root/.claude/` directory
 
 The snapshot does **not** hold:
-- Per-run tokens (Slack, Notion, GitHub) — those are env-var injected at boot
-- Per-run prompts/dates — those are written to `/tmp` at boot
+- MCP servers or Google OAuth state — under Option F (see D15), all data is prefetched by Vercel Functions using `googleapis`, `@slack/web-api`, `@notionhq/client`, and `@octokit/rest`. No MCPs run inside the sandbox.
+- Per-service tokens (Slack, Notion, GitHub) — those stay in Vercel Functions and never enter the sandbox.
+- The Anthropic API key — injected into the sandbox at runtime via env var.
+- Per-run prompts — written to `/tmp/prompt.txt` at boot.
 
 This split lets us rotate credentials without rebaking the snapshot (fast) and update software by rebaking (slow, but rare).
 
-## Auth model — the key simplification
+## Auth model
 
-The single biggest friction-reduction came from a late-breaking insight: **Claude has managed MCP connectors for Google services** that handle the entire OAuth lifecycle.
+All external API auth lives in Vercel Functions (under Option F — see D15). The Sandbox never sees credentials; it only receives the structured blob of pre-fetched data. Tokens are env vars in the Vercel project, rotatable via the dashboard without rebaking the snapshot.
 
 Auth mechanism by source:
 
 | Source | Mechanism | Expires? | Setup friction |
 |---|---|---|---|
-| **Gmail** | Claude managed connector | Anthropic handles refresh | ~1 min (one-click browser auth) |
-| **Google Calendar** | Claude managed connector | Anthropic handles refresh | ~1 min (one-click browser auth) |
+| **Gmail** | OAuth 2.0 refresh token via `googleapis` | Never unless revoked or unused for 6 months | ~5 min (one-time local OAuth via `scripts/auth-google.ts`) |
+| **Google Calendar** | Same OAuth 2.0 refresh token (same scopes session) | Same as Gmail | Shared with Gmail setup |
 | **Notion** | Internal integration secret | Never | ~5 min (create integration, share DB) |
 | **Slack** | Bot token (`xoxb-...`) | Never unless rotated | ~10 min (create app, install to workspace) |
 | **GitHub** | Fine-grained PAT | Configurable (1 year / never) | ~5 min (scope to archive repo only) |
 
-The Claude managed-connector approach eliminates ~2 hours of writing and testing OAuth 2.0 refresh-token helper scripts for Google. Instead of wrangling `client_id` / `client_secret` / `refresh_token` / token endpoint URLs, we click a button. Anthropic holds the tokens and refreshes them silently.
+The one-time Google OAuth dance (`pnpm run auth:google`) opens a local browser, captures the auth code on `localhost:8765/callback`, and prints a refresh token to stdout. Paste that into Vercel env as `GOOGLE_REFRESH_TOKEN`. The `googleapis` client library handles access-token refresh automatically on every call.
 
-**Caveat (to verify day 1):** managed connectors need to work headless after the one-time interactive auth. The snapshot-bake flow is:
-1. Spin up a sandbox interactively
-2. Install Claude Code
-3. Run `claude` — opens managed-connector auth in a browser; approve once
-4. Authenticated state persists in `~/.claude/`
-5. Snapshot the sandbox
-6. Every cron run boots this pre-authenticated state
-
-If headless use turns out to require re-confirm per run, we fall back to custom OAuth for Google. The rest of the architecture is unchanged.
+**History:** The original plan (D12) was to use Claude-managed connectors for Gmail + Calendar. Option F (D15) pivoted because the managed-connector surface exists in Claude.ai / Routines but not in the Claude Code CLI. Moving all source fetching into Vercel Functions using official SDKs turned out to be cleaner anyway (debuggable, deterministic, and showcases every Vercel primitive we wanted to exercise).
 
 ## Output schema
 
@@ -201,10 +194,10 @@ The goal: 8 sections, ~400–600 words total, skimmable in 60 seconds.
 - I run the local auth helper, paste the new token into Vercel env vars
 - Manually trigger the cron URL to re-run today's recap
 
-**Single-MCP outage** (Gmail API 500s for 20 minutes):
-- Agent prompt instructs: continue with available sources, note degraded ones at top of recap
-- Output schema includes `sources_degraded: []` field
-- Recap still publishes — just with a visible "⚠ Gmail unavailable today" note
+**Single-source outage** (e.g., Gmail API 500s for 20 minutes):
+- Prefetch step for that source returns `{ ok: false, reason }` instead of throwing
+- Workflow carries `sources_degraded` forward into the prompt and the output schema
+- Recap still publishes — just with a visible "⚠ Gmail unavailable today" callout in Notion and the Slack DM
 
 **Sandbox timeout** (Claude takes >10 min):
 - WDK surfaces the timeout in step metadata

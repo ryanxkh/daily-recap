@@ -20,7 +20,7 @@ gh repo create daily-recap-archive --private --description "Private archive of d
 
 Seed the archive with an empty `recaps/` folder so the first commit has somewhere to land:
 ```bash
-gh api --method PUT /repos/ryanxkh/daily-recap-archive/contents/recaps/.gitkeep \
+gh api --method PUT /repos/<your-github-username>/daily-recap-archive/contents/recaps/.gitkeep \
   -f message="Initialize recaps folder" \
   -f content="$(echo -n '' | base64)"
 ```
@@ -100,12 +100,14 @@ Under **OAuth & Permissions** → **Bot Token Scopes**, add:
 - `im:write`
 - `users:read`
 
-*(If you want the agent to also READ Slack from inside the sandbox via the Slack MCP, add these too:)*
+*(If you want the agent to READ Slack as a source — DMs, mentions, replies — add these too. Reads happen in a Vercel Function via `@slack/web-api`, not inside the sandbox:)*
 - `channels:history`
 - `groups:history`
 - `im:history`
 - `mpim:history`
 - `search:read`
+
+**Note on `search.messages`:** the Slack Search API requires a *user* token (`xoxp-`), not a bot token. If you want full search coverage, install the app as a user token as well. Without it, the Slack source degrades gracefully (other sources still publish).
 
 ### Install the app to your workspace
 

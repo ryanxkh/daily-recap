@@ -18,10 +18,10 @@ Inspired by [Drew's "Claude Code as a Cron Job"](https://drew.tech/posts/claude-
 - **Next.js** (App Router) — the tiny Next app holds the cron route and workflow definitions
 - **Vercel Cron** — schedule trigger
 - **Vercel Workflow (WDK)** — durable, step-based orchestration with retries
-- **Vercel Sandbox** — ephemeral Firecracker microVM running Claude Code
-- **Claude Code CLI** (headless) — the agent itself, invoked with `-p` and a JSON schema
-- **MCP servers** (inside sandbox): Claude managed Gmail + Calendar connectors, Notion, Slack, GitHub
-- **Sinks** (outside sandbox, from workflow steps): `@notionhq/client`, `@octokit/rest`, `@slack/web-api`
+- **Vercel Sandbox** — Firecracker microVM running Claude Code (booted from a pre-baked snapshot)
+- **Claude Code CLI** (headless) — the agent itself, invoked with `--print --output-format json --json-schema`
+- **Sources** (prefetch, in Vercel Functions): `googleapis` (Gmail + Calendar), `@slack/web-api`, `@notionhq/client`, `@octokit/rest`
+- **Sinks** (fan-out, in Vercel Functions): `@notionhq/client`, `@octokit/rest`, `@slack/web-api`
 - **Zod** — output schema validation
 
 ## Architecture at a glance
@@ -30,12 +30,19 @@ Inspired by [Drew's "Claude Code as a Cron Job"](https://drew.tech/posts/claude-
 Vercel Cron (6pm CT)
   → /api/cron/recap (Next.js)
     → start(dailyRecapWorkflow)
-      → [step] runClaudeInSandbox()
-          - boot sandbox from snap_...
-          - inject MCP tokens from env
-          - run: claude -p --output-format json
-          - return parsed recap JSON
       → Promise.all([
+          [step] prefetchCalendar()   ← googleapis
+          [step] prefetchGmail()      ← googleapis
+          [step] prefetchSlack()      ← @slack/web-api
+          [step] prefetchNotion()     ← @notionhq/client
+          [step] prefetchGitHub()     ← @octokit/rest
+        ])
+      → [step] synthesizeStep()
+          - boot sandbox from snap_...
+          - write prompt + JSON schema to /tmp via heredoc
+          - run: claude --print --output-format json --json-schema ...
+          - strip markdown fences, zod-validate into Recap
+      → Promise.allSettled([
           [step] writeNotionPage(recap),
           [step] writeArchiveMarkdown(recap),
         ])

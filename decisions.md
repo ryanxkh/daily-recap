@@ -144,6 +144,8 @@ Voice: 1st person ("I committed..."). Empty sections keep header with `"nothing 
 
 ## 2026-04-20 — D12: Claude managed connectors for Gmail + Google Calendar
 
+> **Status: Superseded by D15.** The managed-connector surface doesn't exist in the Claude Code CLI (only in Claude.ai / Routines), which invalidated the premise of this decision. D15 pivots to prefetching Google data in Vercel Functions using `googleapis`.
+
 **Decision:** Use Anthropic's managed MCP connectors (`mcp__claude_ai_Gmail__*`, `mcp__claude_ai_Google_Calendar__*`) instead of writing custom Google OAuth refresh-token helpers.
 
 **Alternatives considered:**

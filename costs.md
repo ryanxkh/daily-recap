@@ -18,7 +18,7 @@ Tracking actual operating cost of the daily recap agent. Updated monthly.
 | Notion API | Free | — | $0 |
 | Slack API | Free | — | $0 |
 | GitHub API | Free | — | $0 |
-| Google APIs | Free (via Claude managed connectors) | — | $0 |
+| Google APIs (Gmail + Calendar) | Free tier via `googleapis` SDK | — | $0 |
 | **Total** | | | **~$5–$20** |
 
 ## Actuals (live tracking)
