@@ -39,8 +39,11 @@ async function main() {
     if (stderr) console.error(stderr);
     console.log("✓ Setup complete");
 
-    console.log("→ Taking snapshot…");
-    const snapshot = await sandbox.snapshot();
+    console.log("→ Taking snapshot (no expiration)…");
+    // expiration: 0 = never expires. Snapshots default to a 30-day TTL, which
+    // silently killed the cron once already (410 Gone on boot). This job is
+    // maintenance-free, so pin it to infinite; the image is tiny (Node + CLI).
+    const snapshot = await sandbox.snapshot({ expiration: 0 });
     console.log(`\n✓ Snapshot created: ${snapshot.snapshotId}\n`);
     console.log("Next: set VERCEL_SANDBOX_SNAPSHOT_ID in Vercel env.");
     console.log(

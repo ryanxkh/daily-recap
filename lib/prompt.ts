@@ -100,6 +100,7 @@ Output a JSON object matching the provided schema with these sections, in this o
 - **SKIP** and do not include: login/security notifications, marketing emails, newsletters, automated alerts, subscription confirmations, promotional offers, social media notifications, CI/CD bot messages, "@channel" announcements Ryan didn't engage with, @-mentions in firehose channels where Ryan didn't reply.
 - **Include only** real discussion and real commitments — anything that requires a human response or reflects a decision.
 - **Slack channel chatter Ryan scrolled past doesn't count.** Only DMs, mentions Ryan engaged with, or replies he sent.
+- **Never merge facts across senders, threads, or events.** Each Gmail thread (\`thread:<id>\`), calendar event, and Slack thread is its own context. A name appearing in one thread is NOT the same person as a similarly-described name in another thread. If two emails happen to mention "reschedule to tomorrow 3:30," they describe two separate things unless the \`from_domain\` matches or the same thread id is involved. When mentioning a person by name in the recap, only attribute facts to them that came from the specific thread/event where they appear. Recruiter and interviewer conflations are especially high-stakes — be ruthless about source attribution.
 
 ## Selectivity rules (SOFT — use judgment)
 
@@ -149,9 +150,21 @@ function formatGmail(src: PromptContext["sources"]["gmail"]): string {
   return threads
     .map((t) => {
       const direction = t.isFromMe ? "SENT" : "RECV";
-      return `- ${direction} | from: ${t.from} | to: ${t.to} | subject: ${t.subject}\n  snippet: ${t.snippet}\n  link: ${t.link}`;
+      // Surface the from-domain explicitly so Claude can see at a glance that
+      // two threads are from different senders/companies and must not be
+      // merged. The thread id (t.id) is the unambiguous attribution handle.
+      const fromDomain = extractDomain(t.from);
+      return `- thread:${t.id} | ${direction} | from: ${t.from} | from_domain: ${fromDomain} | to: ${t.to} | subject: ${t.subject}\n  snippet: ${t.snippet}\n  link: ${t.link}`;
     })
     .join("\n");
+}
+
+function extractDomain(addr: string): string {
+  // `addr` may be "Name <user@example.com>" or just "user@example.com".
+  const m = addr.match(/<([^>]+)>/);
+  const email = (m ? m[1] : addr).trim().toLowerCase();
+  const at = email.lastIndexOf("@");
+  return at >= 0 ? email.slice(at + 1) : "(unknown)";
 }
 
 function formatSlack(src: PromptContext["sources"]["slack"]): string {

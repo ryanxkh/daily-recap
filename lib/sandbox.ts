@@ -88,6 +88,17 @@ export async function runClaudeInSandbox(ctx: PromptContext): Promise<Recap> {
     }
 
     const parsed = JSON.parse(stdout);
+
+    // Claude Code surfaces API/auth failures inside the JSON envelope with
+    // is_error:true rather than a nonzero exit — fail loud with the reason
+    // instead of letting an unparseable error envelope fall through to Zod.
+    if ((parsed as Record<string, unknown>)?.is_error === true) {
+      const root = parsed as Record<string, unknown>;
+      throw new Error(
+        `Claude reported an error (api_error_status=${root.api_error_status}): ${String(root.result).slice(0, 300)}`,
+      );
+    }
+
     const recapJson = extractRecapJson(parsed);
     return RecapSchema.parse(recapJson);
   } finally {

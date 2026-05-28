@@ -224,6 +224,31 @@ Voice: 1st person ("I committed..."). Empty sections keep header with `"nothing 
 
 ---
 
+## 2026-05-27 — D17: Snapshot 30-day TTL silently killed the cron
+
+**War story.** The cron ran green daily through 2026-05-16, then failed every day starting 2026-05-17 with the same error: `synthesizeStep failed after 3 retries: Status code 410 is not ok`. No code change, no deploy — a clean cutover on a date boundary.
+
+**Root cause:** Vercel Sandbox snapshots default to a **30-day TTL**. We baked the snapshot ~04-20 (v1 ship day), set `VERCEL_SANDBOX_SNAPSHOT_ID`, and forgot it. Around day 30 the snapshot expired; `Sandbox.create({ source: { type: "snapshot", snapshotId } })` then returns **410 Gone**, which surfaced as the retry-exhausted step failure. The 11 daily failures sat unnoticed except for the Slack error DMs.
+
+**Fix:** Bake with no expiration. `sandbox.snapshot()` takes an `expiration` arg in ms; `0` means never expire ([docs](https://vercel.com/docs/sandbox/concepts/snapshots#snapshot-retention)). Changed `scripts/bake-snapshot.ts` to `sandbox.snapshot({ expiration: 0 })`, re-baked (`snap_PJZjOwdlmPNSdHgbS44fmm2cU5vA`), updated the prod env var, redeployed.
+
+**Why never-expire over a finite TTL:** This is a maintenance-free personal cron. Any finite TTL is just a future outage with a timer on it. The image is tiny (Node + Claude CLI), so snapshot storage cost is negligible. The only reason to re-bake now is a deliberate CLI version bump.
+
+**Plot twist — a second failure hid behind the first.** After re-baking and redeploying, the boot succeeded but the step still failed, now with a Zod error showing *every* field `undefined`. Chased it as a CLI output-format change (the re-bake pulled Claude Code `2.1.152`, a major jump). It wasn't. A diagnostic throw (embed the envelope shape in the error message, since runtime logs aren't retained and `workflow inspect run` *does* return `error.message`) revealed the truth: `is_error: true, api_error_status: 401, "Invalid API key"`. The prod `ANTHROPIC_API_KEY` had been revoked sometime in the prior ~40 days — but the snapshot 410 failed at *boot* every day, so we never reached the Claude call to see the 401. **Fixing the first bug unmasked the second.** Generated a fresh key, set it via the Vercel REST API (the `echo | vercel env add` stdin path silently stored empty in this CLI — REST is reliable), redeployed → green.
+
+**Plot twist, take three.** With a valid key the run finally went green — and immediately revealed a *third* dead credential underneath: Google calendar + gmail returned `invalid_grant`. Root cause: the OAuth consent screen was in **"Testing"** publishing status, and Google revokes external-user refresh tokens after **7 days** when a restricted scope (`gmail.readonly`) is requested. The token had been dead since ~7 days after the v1 ship — masked the whole time by the 410, then by the 401. Fixed by publishing the consent screen to **In production** (kills the 7-day cap even while "unverified"), re-running `auth:google` for a fresh refresh token, and setting it in prod. Also corrected the comment in `auth-google.ts` that wrongly claimed the token "doesn't expire."
+
+**Code hardening from this:** `lib/sandbox.ts` now checks `parsed.is_error === true` and throws the actual API reason, instead of letting an error envelope fall through to Zod and surface as a baffling "all fields undefined." A masked auth failure should never again cost an hour.
+
+**The real headline: three expirations stacked behind one error.** Snapshot TTL (30d) → API key (revoked) → Google refresh token (7d Testing-mode cap). Each was invisible because the one in front of it failed first. Every external credential/artifact this pipeline depends on had an expiry clock, and none of them announced themselves. The fix isn't just "renew them" — it's the liveness alert (a daily cron with no *success* in 48h is broken, regardless of whether any failure DM fired) plus pinning every expiry to "never" where the platform allows it.
+
+**Lessons for the blog post:**
+1. "Set it and forget it" infra has expiry dates you don't see until they fire. The Slack error DM fired 11 times — but nobody watched it. A silent-failure cron needs a *liveness* signal (alert if no success in 48h), not just a failure signal. (v1.5 follow-up.)
+2. **One outage can mask another.** The TTL expiry was a wall in front of a dead key. Fix the visible failure and you may inherit the next one — don't assume "green boot" means "green run."
+3. When runtime logs aren't retained, the durable error channel (here, the WDK run's `error.message`) is a legitimate diagnostic carrier — embed shape into the throw and read it back.
+
+---
+
 ## Upcoming decisions (not yet made)
 
 - Exact Claude Code CLI behavior with `--output-format json --json-schema`: does it wrap in `structured_output`? (verify day 1)

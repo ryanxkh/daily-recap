@@ -16,7 +16,12 @@
  *   3. Exchanges the auth code for a refresh token
  *   4. Prints the refresh token to paste into Vercel env as GOOGLE_REFRESH_TOKEN
  *
- * The refresh token doesn't expire (unless revoked or unused for 6 months).
+ * Refresh-token longevity depends on the OAuth consent screen's publishing
+ * status. In "Testing", external-user refresh tokens are revoked after 7 DAYS
+ * (because we request the restricted gmail.readonly scope). The app must be
+ * "In production" for long-lived tokens — then they last until revoked or
+ * unused for 6 months. (This 7-day trap silently blinded the pipeline once;
+ * see decisions.md D17.)
  */
 
 import { google } from "googleapis";
@@ -95,7 +100,10 @@ async function main() {
   console.log("\n✓ Success. Add these to Vercel env (and .env.local):\n");
   console.log(`GOOGLE_REFRESH_TOKEN=${tokens.refresh_token}`);
   console.log(`GOOGLE_USER_EMAIL=<your Gmail address>`);
-  console.log("\nThe refresh token does not expire unless revoked or unused for 6 months.");
+  console.log(
+    "\nThis token is long-lived ONLY if the consent screen is 'In production'." +
+      "\nIn 'Testing' it dies after 7 days (gmail.readonly is a restricted scope).",
+  );
 }
 
 function openInBrowser(url: string) {

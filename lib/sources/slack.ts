@@ -1,9 +1,13 @@
 /**
  * Slack source — DMs to you and messages where you were mentioned today.
  *
- * Uses Slack Search API (`search.messages`). Requires `search:read.public`
- * scope. Bot will only see channels it's been invited to — that's a known
- * limitation we accept for v1.
+ * Uses Slack Search API (`search.messages`). Slack REQUIRES a USER token
+ * (xoxp-) for this endpoint — bot tokens are rejected with
+ * `not_allowed_token_type`. Configure `search:read` under User Token Scopes
+ * in your Slack app, install/reinstall to the workspace, and set the
+ * resulting xoxp- token as SLACK_USER_TOKEN. We keep SLACK_BOT_TOKEN as a
+ * fallback for clarity in error messages but the search call will fail
+ * against a bot token.
  */
 
 import { WebClient } from "@slack/web-api";
@@ -23,10 +27,19 @@ export interface SlackMessageSummary {
 
 export async function fetchSlack(window: DateWindow): Promise<Result<SlackMessageSummary[]>> {
   try {
-    const token = process.env.SLACK_BOT_TOKEN;
+    // Prefer the user token (required by search.messages); fall back to the
+    // bot token only so we surface a clearer reason when neither is set.
+    const token = process.env.SLACK_USER_TOKEN || process.env.SLACK_BOT_TOKEN;
     const userId = process.env.SLACK_USER_ID;
     if (!token || !userId) {
-      return { ok: false, reason: "SLACK_BOT_TOKEN or SLACK_USER_ID missing" };
+      return { ok: false, reason: "SLACK_USER_TOKEN/SLACK_BOT_TOKEN or SLACK_USER_ID missing" };
+    }
+    if (!token.startsWith("xoxp-")) {
+      return {
+        ok: false,
+        reason:
+          "Slack search.messages requires a user token (xoxp-). Set SLACK_USER_TOKEN with search:read scope.",
+      };
     }
 
     const slack = new WebClient(token);
